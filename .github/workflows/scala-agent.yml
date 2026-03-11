@@ -24,6 +24,8 @@ jobs:
         uses: VirtusLab/scala-cli-setup@v1
 
       - name: Run sample agent
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           scala-cli run src/main/scala/DataQualityAgentApp.scala -- \
             --sample-data \

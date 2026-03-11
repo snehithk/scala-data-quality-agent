@@ -39,6 +39,8 @@ The repository includes a workflow at `.github/workflows/scala-agent.yml` that:
 - runs the sample dataset
 - uploads `quality_report.json` as a build artifact
 
+If you want the workflow to call OpenRouter, add a repository secret named `OPENROUTER_API_KEY`.
+
 ## Files
 
 - `src/main/scala/DataQualityAgentApp.scala`
