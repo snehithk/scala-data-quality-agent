@@ -43,7 +43,7 @@ object DataQualityAgentApp {
       model: String = "nvidia/nemotron-3-nano-30b-a3b:free"
   )
 
-  private val DefaultAllowedMarkets = Seq("NASDAQ", "NYSE", "AMEX")
+  val DefaultAllowedMarkets = Seq("NASDAQ", "NYSE", "AMEX")
 
   def main(rawArgs: Array[String]): Unit = {
     val args = parseArgs(rawArgs.toList)
@@ -544,7 +544,9 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
   }.toOption
 
   private def parseJsonObject(raw: String, requiredKeys: Set[String]): Option[Obj] =
-    Try(ujson.read(raw).obj).toOption.filter(obj => requiredKeys.subsetOf(obj.keySet))
+    Try(ujson.read(raw)).toOption.collect {
+      case obj: Obj if requiredKeys.subsetOf(obj.value.keySet) => obj
+    }
 
   private def normalizeAssessment(obj: Obj): Unit = {
     Seq("key_issues", "root_causes", "recommendations", "next_checks", "suggested_fixes").foreach { key =>
