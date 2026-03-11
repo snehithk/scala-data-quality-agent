@@ -1,0 +1,28 @@
+{
+  "date": {
+    "dtype": "date",
+    "nullable": false
+  },
+  "stock_symbol": {
+    "dtype": "string",
+    "nullable": false,
+    "allowed_values": ["AAPL", "MSFT", "GOOGL", "AMZN"]
+  },
+  "open_price": {
+    "dtype": "double",
+    "nullable": false
+  },
+  "close_price": {
+    "dtype": "double",
+    "nullable": false
+  },
+  "volume": {
+    "dtype": "double",
+    "nullable": false
+  },
+  "market": {
+    "dtype": "string",
+    "nullable": false,
+    "allowed_values": ["NASDAQ", "NYSE"]
+  }
+}

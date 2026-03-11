@@ -1,0 +1,37 @@
+name: Scala Data Quality Agent
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  run-sample:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Scala CLI
+        uses: VirtusLab/scala-cli-setup@v1
+
+      - name: Run sample agent
+        run: |
+          scala-cli run src/main/scala/DataQualityAgentApp.scala -- \
+            --sample-data \
+            --expected-schema examples/expected_schema.json \
+            --output quality_report.json
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scala-data-quality-report
+          path: quality_report.json
