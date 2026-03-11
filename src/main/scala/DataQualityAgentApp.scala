@@ -271,7 +271,7 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
       Obj("name" -> "schema_validation", "priority" -> "HIGH", "reason" -> "An expected schema was supplied by the caller.")
     )
 
-    val aiChecks = semantic.obj.get("priority_checks").map(_.arr.toVector).getOrElse(Vector.empty)
+    val aiChecks = semantic.obj.get("priority_checks").map(_.arr.toVector.flatMap(normalizeCheck)).getOrElse(Vector.empty)
     val checks = dedupeChecks(baseChecks ++ schemaCheck ++ aiChecks)
 
     val columnRules = Obj()
@@ -595,7 +595,42 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
   }
 
   private def dedupeChecks(checks: Vector[Value]): Vector[Value] =
-    checks.groupBy(_("name").str).values.map(_.head).toVector.sortBy(check => (severityRank(check("priority").str.toUpperCase), check("name").str))
+    checks
+      .flatMap(normalizeCheck)
+      .groupBy(_("name").str)
+      .values
+      .map(_.head)
+      .toVector
+      .sortBy(check => (severityRank(check("priority").str.toUpperCase), check("name").str))
+
+  private def normalizeCheck(value: Value): Option[Value] = value match {
+    case obj: Obj =>
+      val nameOpt =
+        obj.value.get("name").collect { case Str(value) if value.trim.nonEmpty => value.trim }
+          .orElse(obj.value.get("check_name").collect { case Str(value) if value.trim.nonEmpty => value.trim })
+
+      nameOpt.map { name =>
+        val priority = obj.value.get("priority").collect { case Str(value) if value.trim.nonEmpty => value.trim.toUpperCase }.getOrElse("MEDIUM")
+        val reason = obj.value.get("reason").collect { case Str(value) if value.trim.nonEmpty => value.trim }
+          .orElse(obj.value.get("description").collect { case Str(value) if value.trim.nonEmpty => value.trim })
+          .getOrElse("AI-suggested dataset-specific check.")
+
+        Obj(
+          "name" -> name,
+          "priority" -> priority,
+          "reason" -> reason
+        )
+      }
+    case Str(value) if value.trim.nonEmpty =>
+      Some(
+        Obj(
+          "name" -> value.trim.toLowerCase.replaceAll("\\s+", "_"),
+          "priority" -> "MEDIUM",
+          "reason" -> value.trim
+        )
+      )
+    case _ => None
+  }
 
   private def dedupeIssues(issues: Vector[DataIssue]): Vector[DataIssue] =
     issues.groupBy(issue => (issue.issueType, issue.column, issue.description)).values.map(_.head).toVector
