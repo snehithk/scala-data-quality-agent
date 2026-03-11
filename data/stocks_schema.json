@@ -1,0 +1,15 @@
+{
+  "symbol": {
+    "dtype": "string",
+    "nullable": false,
+    "allowed_values": ["AAPL", "AMZN", "GOOG", "IBM", "MSFT"]
+  },
+  "date": {
+    "dtype": "string",
+    "nullable": false
+  },
+  "price": {
+    "dtype": "double",
+    "nullable": false
+  }
+}

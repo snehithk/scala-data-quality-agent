@@ -23,13 +23,13 @@ jobs:
       - name: Setup Scala CLI
         uses: VirtusLab/scala-cli-setup@v1
 
-      - name: Run sample agent
+      - name: Run agent on real dataset
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           scala-cli run src/main/scala/DataQualityAgentApp.scala -- \
-            --sample-data \
-            --expected-schema examples/expected_schema.json \
+            --input data/stocks.csv \
+            --expected-schema data/stocks_schema.json \
             --output quality_report.json
 
       - name: Upload report artifact
