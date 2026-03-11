@@ -276,11 +276,13 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
 
     val columnRules = Obj()
     semantic("column_semantics").obj.foreach { case (column, value) =>
-      val rule = Obj()
-      value.obj.get("should_be_non_negative").foreach(v => rule("non_negative") = v)
-      value.obj.get("allowed_values").filterNot(_.isNull).foreach(v => rule("allowed_values") = v)
-      value.obj.get("is_identifier").foreach(v => rule("identifier") = v)
-      if (rule.obj.nonEmpty) columnRules(column) = rule
+      normalizeColumnSemantic(column, value).foreach { normalized =>
+        val rule = Obj()
+        normalized.value.get("should_be_non_negative").foreach(v => rule("non_negative") = v)
+        normalized.value.get("allowed_values").filterNot(_.isNull).foreach(v => rule("allowed_values") = v)
+        normalized.value.get("is_identifier").foreach(v => rule("identifier") = v)
+        if (rule.obj.nonEmpty) columnRules(column) = rule
+      }
     }
 
     Obj(
@@ -357,7 +359,7 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
         }
       }
 
-      if (semanticCols.get(column).exists(_.obj.get("is_identifier").exists(_.bool))) {
+      if (semanticCols.get(column).flatMap(value => normalizeColumnSemantic(column, value)).exists(_.value.get("is_identifier").exists(_.bool))) {
         val duplicates = values.filter(_.nonEmpty).groupBy(identity).values.map(_.size - 1).filter(_ > 0).sum
         if (duplicates > 0) {
           issues += DataIssue("IDENTIFIER_DUPLICATES", column, "HIGH", duplicates, s"Identifier-like column '$column' contains duplicate values.", Obj())
@@ -627,6 +629,33 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
           "name" -> value.trim.toLowerCase.replaceAll("\\s+", "_"),
           "priority" -> "MEDIUM",
           "reason" -> value.trim
+        )
+      )
+    case _ => None
+  }
+
+  private def normalizeColumnSemantic(column: String, value: Value): Option[Obj] = value match {
+    case obj: Obj => Some(obj)
+    case Str(text) =>
+      val lowered = text.toLowerCase
+      val semanticType =
+        if (lowered.contains("date")) "event_date"
+        else if (lowered.contains("market") || lowered.contains("exchange")) "exchange_code"
+        else if (lowered.contains("symbol") || lowered.contains("ticker")) "ticker_symbol"
+        else if (Seq("price", "amount", "volume", "count", "qty").exists(lowered.contains)) "metric"
+        else "generic_field"
+
+      val allowedValues: Value =
+        if (semanticType == "exchange_code") Arr.from(DataQualityAgentApp.DefaultAllowedMarkets.map(Str(_)))
+        else Null
+
+      Some(
+        Obj(
+          "semantic_type" -> semanticType,
+          "should_be_non_negative" -> Bool(semanticType == "metric"),
+          "is_identifier" -> Bool(column == "id" || column.endsWith("_id")),
+          "allowed_values" -> allowedValues,
+          "source_description" -> text
         )
       )
     case _ => None
