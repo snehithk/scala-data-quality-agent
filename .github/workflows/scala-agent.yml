@@ -27,7 +27,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          scala-cli run src/main/scala/DataQualityAgentApp.scala -- \
+          scala-cli run src/main/scala --main-class DataQualityAgentApp -- \
             --input data/stocks.csv \
             --expected-schema data/stocks_schema.json \
             --output quality_report.json

@@ -9,13 +9,13 @@ This project uses `scala-cli`, so it can run without an `sbt` build setup.
 Built-in sample dataset:
 
 ```bash
-scala-cli run src/main/scala/DataQualityAgentApp.scala -- --sample-data --expected-schema examples/expected_schema.json
+scala-cli run src/main/scala --main-class DataQualityAgentApp -- --sample-data --expected-schema examples/expected_schema.json
 ```
 
 Real public stock dataset included in the repo:
 
 ```bash
-scala-cli run src/main/scala/DataQualityAgentApp.scala -- \
+scala-cli run src/main/scala --main-class DataQualityAgentApp -- \
   --input data/stocks.csv \
   --expected-schema data/stocks_schema.json \
   --output report.json
@@ -25,7 +25,7 @@ With your own CSV:
 
 ```bash
 export OPENROUTER_API_KEY="your_key_here"
-scala-cli run src/main/scala/DataQualityAgentApp.scala -- \
+scala-cli run src/main/scala --main-class DataQualityAgentApp -- \
   --input data.csv \
   --expected-schema examples/expected_schema.json \
   --output report.json
