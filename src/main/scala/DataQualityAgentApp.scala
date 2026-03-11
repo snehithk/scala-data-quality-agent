@@ -34,6 +34,20 @@ object DataQualityAgentApp {
     )
   }
 
+  final case class CheckSpec(
+      name: String,
+      params: Obj,
+      priority: String,
+      reason: String
+  ) {
+    def toJson: Value = Obj(
+      "name" -> name,
+      "params" -> params,
+      "priority" -> priority,
+      "reason" -> reason
+    )
+  }
+
   final case class Args(
       input: Option[Path] = None,
       expectedSchema: Option[Path] = None,
@@ -84,8 +98,8 @@ object DataQualityAgentApp {
 
   private def printUsage(): Unit = {
     println("Usage:")
-    println("  sbt run --sample-data")
-    println("  sbt \"run --input data.csv --expected-schema schema.json --output report.json\"")
+    println("  scala-cli run src/main/scala/DataQualityAgentApp.scala -- --sample-data")
+    println("  scala-cli run src/main/scala/DataQualityAgentApp.scala -- --input data.csv --expected-schema schema.json --output report.json")
   }
 
   private def loadRows(args: Args): Vector[Row] =
@@ -141,11 +155,27 @@ object DataQualityAgentApp {
 final class DataQualityAgent(apiKey: Option[String], model: String) {
   import DataQualityAgentApp._
 
+  private val validatorRegistry: Map[String, CheckSpec => Vector[DataIssue]] = Map(
+    "missing_values" -> runMissingValuesCheck,
+    "duplicate_rows" -> runDuplicateRowsCheck,
+    "infinite_values" -> runInfiniteValuesCheck,
+    "blank_strings" -> runBlankStringsCheck,
+    "outliers" -> runOutlierCheck,
+    "schema_validation" -> runSchemaValidationCheck,
+    "non_negative" -> runNonNegativeCheck,
+    "allowed_values" -> runAllowedValuesCheck,
+    "composite_uniqueness" -> runCompositeUniquenessCheck,
+    "identifier_duplicates" -> runIdentifierDuplicateCheck
+  )
+
   def analyze(rows: Vector[Row], expectedSchema: Option[Value]): Value = {
+    currentRows = rows
+    currentExpectedSchema = expectedSchema
     val profile = profileDataset(rows)
     val semanticContext = inferSemantics(rows, profile)
     val checkPlan = buildCheckPlan(semanticContext, expectedSchema)
-    val issues = runChecks(rows, semanticContext, checkPlan, expectedSchema)
+    val execution = runChecks(rows, semanticContext, checkPlan, expectedSchema)
+    val issues = execution("issues").arr.toVector.map(parseIssue)
     val score = computeScore(rows.size.max(1), issues)
     val assessment = assess(profile, semanticContext, checkPlan, issues, score)
 
@@ -161,7 +191,9 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
       "dataset_profile" -> profile,
       "semantic_context" -> semanticContext,
       "check_plan" -> checkPlan,
-      "issues" -> Arr.from(issues.map(_.toJson)),
+      "executed_checks" -> execution("executed_checks"),
+      "advisory_checks" -> execution("advisory_checks"),
+      "issues" -> execution("issues"),
       "quality_score" -> score,
       "severity" -> assessment("severity"),
       "assessment" -> assessment
@@ -172,6 +204,8 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
     val profile = analysis("dataset_profile")
     val semantic = analysis("semantic_context")
     val plan = analysis("check_plan")("checks").arr.take(6)
+    val executedChecks = analysis("executed_checks").arr
+    val advisoryChecks = analysis("advisory_checks").arr
     val issues = analysis("issues").arr.take(8)
     val assessment = analysis("assessment")
 
@@ -189,6 +223,13 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
     builder.append("Planned Checks:\n")
     plan.foreach { check =>
       builder.append(s"- [${check("priority").str}] ${check("name").str}: ${check("reason").str}\n")
+    }
+    builder.append(s"\nExecuted Checks: ${executedChecks.size}\n")
+    if (advisoryChecks.nonEmpty) {
+      builder.append("Advisory Checks:\n")
+      advisoryChecks.take(4).foreach { check =>
+        builder.append(s"- ${check("name").str}: ${check("reason").str}\n")
+      }
     }
     builder.append("\nKey Issues:\n")
     issues.foreach { issue =>
@@ -260,19 +301,20 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
 
   private def buildCheckPlan(semantic: Value, expectedSchema: Option[Value]): Value = {
     val baseChecks = Vector(
-      Obj("name" -> "missing_values", "priority" -> "HIGH", "reason" -> "Completeness is a baseline quality gate."),
-      Obj("name" -> "duplicate_rows", "priority" -> "HIGH", "reason" -> "Duplicate records distort downstream metrics."),
-      Obj("name" -> "infinite_values", "priority" -> "HIGH", "reason" -> "Infinite values break analytics and models."),
-      Obj("name" -> "blank_strings", "priority" -> "MEDIUM", "reason" -> "Blank strings hide missing data."),
-      Obj("name" -> "outliers", "priority" -> "MEDIUM", "reason" -> "Extreme values may indicate ingestion issues.")
+      CheckSpec("missing_values", Obj(), "HIGH", "Completeness is a baseline quality gate."),
+      CheckSpec("duplicate_rows", Obj(), "HIGH", "Duplicate records distort downstream metrics."),
+      CheckSpec("infinite_values", Obj(), "HIGH", "Infinite values break analytics and models."),
+      CheckSpec("blank_strings", Obj(), "MEDIUM", "Blank strings hide missing data."),
+      CheckSpec("outliers", Obj(), "MEDIUM", "Extreme values may indicate ingestion issues.")
     )
 
     val schemaCheck = expectedSchema.toVector.map(_ =>
-      Obj("name" -> "schema_validation", "priority" -> "HIGH", "reason" -> "An expected schema was supplied by the caller.")
+      CheckSpec("schema_validation", Obj(), "HIGH", "An expected schema was supplied by the caller.")
     )
 
+    val inferredChecks = deriveChecksFromSemantics(semantic)
     val aiChecks = semantic.obj.get("priority_checks").map(_.arr.toVector.flatMap(normalizeCheck)).getOrElse(Vector.empty)
-    val checks = dedupeChecks(baseChecks ++ schemaCheck ++ aiChecks)
+    val checks = dedupeChecks(baseChecks ++ schemaCheck ++ inferredChecks ++ aiChecks)
 
     val columnRules = Obj()
     semantic("column_semantics").obj.foreach { case (column, value) =>
@@ -289,7 +331,7 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
       "analysis_mode" -> semantic("analysis_mode").str,
       "dataset_purpose" -> semantic("dataset_purpose").str,
       "business_rules" -> semantic("business_rules"),
-      "checks" -> Arr.from(checks),
+      "checks" -> Arr.from(checks.map(_.toJson)),
       "column_rules" -> columnRules
     )
   }
@@ -299,79 +341,28 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
       semantic: Value,
       plan: Value,
       expectedSchema: Option[Value]
-  ): Vector[DataIssue] = {
-    val columns = rows.headOption.map(_.values.keys.toVector).getOrElse(Vector.empty)
-    val columnRules = plan("column_rules").obj
-    val semanticCols = semantic("column_semantics").obj
+  ): Value = {
+    val planSpecs = plan("checks").arr.toVector.flatMap(parseCheckSpec)
+    val supported = collection.mutable.ArrayBuffer.empty[Value]
+    val advisory = collection.mutable.ArrayBuffer.empty[Value]
+    val allIssues = collection.mutable.ArrayBuffer.empty[DataIssue]
 
-    val missing = columns.flatMap { column =>
-      val count = rows.count(_.values.getOrElse(column, "").trim.isEmpty)
-      Option.when(count > 0)(
-        DataIssue("MISSING_VALUES", column, "HIGH", count, s"Column '$column' contains $count missing value(s).", Obj("missing_ratio" -> Num(round4(count.toDouble / rows.size.max(1)))))
-      )
-    }
-
-    val duplicateCount = rows.groupBy(_.values).values.map(_.size - 1).filter(_ > 0).sum
-    val duplicateIssue =
-      Option.when(duplicateCount > 0)(DataIssue("DUPLICATE_ROWS", "__row__", "HIGH", duplicateCount, s"Dataset contains $duplicateCount duplicated row(s).", Obj()))
-
-    val numericIssues = columns.flatMap { column =>
-      val values = rows.map(_.values.getOrElse(column, ""))
-      if (!values.exists(v => parseDouble(v).isDefined || isInfinity(v))) Vector.empty
-      else {
-        val infiniteCount = values.count(isInfinity)
-        val finiteValues = values.flatMap(parseDouble).filter(_.isFinite)
-        val issues = collection.mutable.ArrayBuffer.empty[DataIssue]
-
-        if (infiniteCount > 0) {
-          issues += DataIssue("INFINITE_VALUES", column, "HIGH", infiniteCount, s"Column '$column' contains $infiniteCount infinite value(s).", Obj())
-        }
-
-        if (columnRules.get(column).exists(_.obj.get("non_negative").exists(_.bool))) {
-          val negativeCount = finiteValues.count(_ < 0)
-          if (negativeCount > 0) {
-            issues += DataIssue("NEGATIVE_VALUES", column, "MEDIUM", negativeCount, s"Column '$column' has $negativeCount unexpected negative value(s).", Obj("min_value" -> Num(finiteValues.min)))
-          }
-        }
-
-        val outlierCount = countOutliers(finiteValues)
-        if (outlierCount > 0) {
-          issues += DataIssue("OUTLIERS", column, "MEDIUM", outlierCount, s"Column '$column' has $outlierCount value(s) outside the IQR bounds.", Obj())
-        }
-        issues.toVector
+    planSpecs.foreach { spec =>
+      validatorRegistry.get(spec.name) match {
+        case Some(validator) =>
+          supported += spec.toJson
+          allIssues ++= validator(spec)
+        case None =>
+          advisory += spec.toJson
       }
     }
 
-    val categoricalIssues = columns.flatMap { column =>
-      val values = rows.map(_.values.getOrElse(column, ""))
-      val issues = collection.mutable.ArrayBuffer.empty[DataIssue]
-
-      val blankCount = values.count(_.trim.isEmpty)
-      if (blankCount > 0) {
-        issues += DataIssue("EMPTY_STRINGS", column, "MEDIUM", blankCount, s"Column '$column' contains $blankCount blank string value(s).", Obj())
-      }
-
-      columnRules.get(column).flatMap(_.obj.get("allowed_values")).foreach { allowed =>
-        val allowedSet = allowed.arr.map(_.str).toSet
-        val invalid = values.filter(v => v.nonEmpty && !allowedSet.contains(v))
-        if (invalid.nonEmpty) {
-          issues += DataIssue("ENUM_VIOLATION", column, "MEDIUM", invalid.size, s"Column '$column' contains values outside the allowed set.", Obj("sample_invalid_values" -> Arr.from(invalid.distinct.take(5).map(Str(_)))))
-        }
-      }
-
-      if (semanticCols.get(column).flatMap(value => normalizeColumnSemantic(column, value)).exists(_.value.get("is_identifier").exists(_.bool))) {
-        val duplicates = values.filter(_.nonEmpty).groupBy(identity).values.map(_.size - 1).filter(_ > 0).sum
-        if (duplicates > 0) {
-          issues += DataIssue("IDENTIFIER_DUPLICATES", column, "HIGH", duplicates, s"Identifier-like column '$column' contains duplicate values.", Obj())
-        }
-      }
-
-      issues.toVector
-    }
-
-    val schemaIssues = expectedSchema.map(validateSchema(rows, _)).getOrElse(Vector.empty)
-    dedupeIssues((missing ++ duplicateIssue.toVector ++ numericIssues ++ categoricalIssues ++ schemaIssues).toVector)
-      .sortBy(issue => (severityRank(issue.severity), issue.issueType, issue.column))
+    val dedupedIssues = dedupeIssues(allIssues.toVector).sortBy(issue => (severityRank(issue.severity), issue.issueType, issue.column))
+    Obj(
+      "executed_checks" -> Arr.from(supported),
+      "advisory_checks" -> Arr.from(advisory),
+      "issues" -> Arr.from(dedupedIssues.map(_.toJson))
+    )
   }
 
   private def computeScore(rowCount: Int, issues: Vector[DataIssue]): Int = {
@@ -429,8 +420,8 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
       ),
       "column_semantics" -> semantics,
       "priority_checks" -> Arr(
-        Obj("name" -> "non_negative_metrics", "priority" -> "HIGH", "reason" -> "Metrics should not be negative."),
-        Obj("name" -> "categorical_domain_validation", "priority" -> "MEDIUM", "reason" -> "Code columns should stay within expected values.")
+        Obj("name" -> "non_negative", "params" -> Obj("column" -> "price"), "priority" -> "HIGH", "reason" -> "Metrics should not be negative."),
+        Obj("name" -> "allowed_values", "params" -> Obj("column" -> "market", "values" -> Arr.from(DefaultAllowedMarkets.map(Str(_)))), "priority" -> "MEDIUM", "reason" -> "Code columns should stay within expected values.")
       )
     )
   }
@@ -474,6 +465,8 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
       s"""You are an AI data quality agent. Infer what this dataset likely represents and which checks matter most.
          |Return valid JSON only with keys:
          |dataset_purpose, dataset_type, business_rules, column_semantics, priority_checks.
+         |For priority_checks, each item must be an object with keys: name, params, priority, reason.
+         |Use supported check names when possible: non_negative, allowed_values, composite_uniqueness, identifier_duplicates, outliers.
          |
          |Dataset payload:
          |${ujson.write(profile, indent = 2)}
@@ -596,16 +589,15 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
     }
   }
 
-  private def dedupeChecks(checks: Vector[Value]): Vector[Value] =
+  private def dedupeChecks(checks: Vector[CheckSpec]): Vector[CheckSpec] =
     checks
-      .flatMap(normalizeCheck)
-      .groupBy(_("name").str)
+      .groupBy(spec => (spec.name, ujson.write(spec.params)))
       .values
       .map(_.head)
       .toVector
-      .sortBy(check => (severityRank(check("priority").str.toUpperCase), check("name").str))
+      .sortBy(spec => (severityRank(spec.priority.toUpperCase), spec.name))
 
-  private def normalizeCheck(value: Value): Option[Value] = value match {
+  private def normalizeCheck(value: Value): Option[CheckSpec] = value match {
     case obj: Obj =>
       val nameOpt =
         obj.value.get("name").collect { case Str(value) if value.trim.nonEmpty => value.trim }
@@ -616,23 +608,21 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
         val reason = obj.value.get("reason").collect { case Str(value) if value.trim.nonEmpty => value.trim }
           .orElse(obj.value.get("description").collect { case Str(value) if value.trim.nonEmpty => value.trim })
           .getOrElse("AI-suggested dataset-specific check.")
+        val params = obj.value.get("params").collect { case paramsObj: Obj => paramsObj }.getOrElse(Obj())
 
-        Obj(
-          "name" -> name,
-          "priority" -> priority,
-          "reason" -> reason
+        CheckSpec(
+          name = name.trim.toLowerCase.replaceAll("\\s+", "_"),
+          params = params,
+          priority = priority,
+          reason = reason
         )
       }
     case Str(value) if value.trim.nonEmpty =>
-      Some(
-        Obj(
-          "name" -> value.trim.toLowerCase.replaceAll("\\s+", "_"),
-          "priority" -> "MEDIUM",
-          "reason" -> value.trim
-        )
-      )
+      Some(CheckSpec(value.trim.toLowerCase.replaceAll("\\s+", "_"), Obj(), "MEDIUM", value.trim))
     case _ => None
   }
+
+  private def parseCheckSpec(value: Value): Option[CheckSpec] = normalizeCheck(value)
 
   private def normalizeColumnSemantic(column: String, value: Value): Option[Obj] = value match {
     case obj: Obj => Some(obj)
@@ -663,6 +653,146 @@ final class DataQualityAgent(apiKey: Option[String], model: String) {
 
   private def dedupeIssues(issues: Vector[DataIssue]): Vector[DataIssue] =
     issues.groupBy(issue => (issue.issueType, issue.column, issue.description)).values.map(_.head).toVector
+
+  private def deriveChecksFromSemantics(semantic: Value): Vector[CheckSpec] =
+    semantic("column_semantics").obj.toVector.flatMap { case (column, value) =>
+      normalizeColumnSemantic(column, value).toVector.flatMap { normalized =>
+        val checks = collection.mutable.ArrayBuffer.empty[CheckSpec]
+        if (normalized.value.get("should_be_non_negative").exists(_.bool)) {
+          checks += CheckSpec("non_negative", Obj("column" -> column), "HIGH", s"Column '$column' should not contain negative values.")
+        }
+        normalized.value.get("allowed_values").filterNot(_.isNull).foreach { values =>
+          checks += CheckSpec("allowed_values", Obj("column" -> column, "values" -> values), "MEDIUM", s"Column '$column' should stay within allowed values.")
+        }
+        if (normalized.value.get("is_identifier").exists(_.bool)) {
+          checks += CheckSpec("identifier_duplicates", Obj("column" -> column), "HIGH", s"Identifier-like column '$column' should not repeat.")
+        }
+        checks.toVector
+      }
+    }
+
+  private def parseIssue(value: Value): DataIssue =
+    DataIssue(
+      issueType = value("issue_type").str,
+      column = value("column").str,
+      severity = value("severity").str,
+      count = value("count").num.toInt,
+      description = value("description").str,
+      evidence = value("evidence").obj
+    )
+
+  private def runMissingValuesCheck(spec: CheckSpec): Vector[DataIssue] = {
+    val columns = datasetColumns
+    columns.flatMap { column =>
+      val count = currentRows.count(_.values.getOrElse(column, "").trim.isEmpty)
+      Option.when(count > 0)(
+        DataIssue("MISSING_VALUES", column, "HIGH", count, s"Column '$column' contains $count missing value(s).", Obj("missing_ratio" -> Num(round4(count.toDouble / currentRows.size.max(1)))))
+      )
+    }
+  }
+
+  private def runDuplicateRowsCheck(spec: CheckSpec): Vector[DataIssue] = {
+    val duplicateCount = currentRows.groupBy(_.values).values.map(_.size - 1).filter(_ > 0).sum
+    Option.when(duplicateCount > 0)(
+      DataIssue("DUPLICATE_ROWS", "__row__", "HIGH", duplicateCount, s"Dataset contains $duplicateCount duplicated row(s).", Obj())
+    ).toVector
+  }
+
+  private def runInfiniteValuesCheck(spec: CheckSpec): Vector[DataIssue] =
+    datasetColumns.flatMap { column =>
+      val values = currentRows.map(_.values.getOrElse(column, ""))
+      val infiniteCount = values.count(isInfinity)
+      Option.when(infiniteCount > 0)(
+        DataIssue("INFINITE_VALUES", column, "HIGH", infiniteCount, s"Column '$column' contains $infiniteCount infinite value(s).", Obj())
+      )
+    }
+
+  private def runBlankStringsCheck(spec: CheckSpec): Vector[DataIssue] =
+    datasetColumns.flatMap { column =>
+      val blankCount = currentRows.map(_.values.getOrElse(column, "")).count(_.trim.isEmpty)
+      Option.when(blankCount > 0)(
+        DataIssue("EMPTY_STRINGS", column, "MEDIUM", blankCount, s"Column '$column' contains $blankCount blank string value(s).", Obj())
+      )
+    }
+
+  private def runOutlierCheck(spec: CheckSpec): Vector[DataIssue] = {
+    val targetColumns = spec.params.value.get("column").map(v => Vector(v.str)).getOrElse(numericColumns)
+    targetColumns.flatMap { column =>
+      val values = numericValues(column)
+      val outlierCount = countOutliers(values)
+      Option.when(outlierCount > 0)(
+        DataIssue("OUTLIERS", column, "MEDIUM", outlierCount, s"Column '$column' has $outlierCount value(s) outside the IQR bounds.", Obj())
+      )
+    }
+  }
+
+  private def runSchemaValidationCheck(spec: CheckSpec): Vector[DataIssue] =
+    currentExpectedSchema.map(validateSchema(currentRows, _)).getOrElse(Vector.empty)
+
+  private def runNonNegativeCheck(spec: CheckSpec): Vector[DataIssue] = {
+    spec.params.value.get("column").toVector.flatMap { columnValue =>
+      val column = columnValue.str
+      val values = numericValues(column)
+      val negativeCount = values.count(_ < 0)
+      Option.when(negativeCount > 0)(
+        DataIssue("NEGATIVE_VALUES", column, "MEDIUM", negativeCount, s"Column '$column' has $negativeCount unexpected negative value(s).", Obj("min_value" -> Num(values.min)))
+      )
+    }
+  }
+
+  private def runAllowedValuesCheck(spec: CheckSpec): Vector[DataIssue] = {
+    val columnOpt = spec.params.value.get("column").collect { case Str(value) => value }
+    val valuesOpt = spec.params.value.get("values").collect { case arr: Arr => arr.arr.map(_.str).toSet }
+    (for {
+      column <- columnOpt.toVector
+      allowed <- valuesOpt.toVector
+    } yield {
+      val invalid = currentRows.map(_.values.getOrElse(column, "")).filter(v => v.nonEmpty && !allowed.contains(v))
+      Option.when(invalid.nonEmpty)(
+        DataIssue("ENUM_VIOLATION", column, "MEDIUM", invalid.size, s"Column '$column' contains values outside the allowed set.", Obj("sample_invalid_values" -> Arr.from(invalid.distinct.take(5).map(Str(_)))))
+      )
+    }).flatten
+  }
+
+  private def runCompositeUniquenessCheck(spec: CheckSpec): Vector[DataIssue] = {
+    val columns = spec.params.value.get("columns").collect { case arr: Arr => arr.arr.map(_.str).toVector }.getOrElse(Vector.empty)
+    if (columns.isEmpty) Vector.empty
+    else {
+      val duplicates = currentRows
+        .map(row => columns.map(col => row.values.getOrElse(col, "")).mkString("||"))
+        .filter(_.nonEmpty)
+        .groupBy(identity)
+        .values
+        .map(_.size - 1)
+        .filter(_ > 0)
+        .sum
+      Option.when(duplicates > 0)(
+        DataIssue("COMPOSITE_DUPLICATES", columns.mkString(","), "HIGH", duplicates, s"Columns ${columns.mkString("(", ", ", ")")} contain duplicate combinations.", Obj())
+      ).toVector
+    }
+  }
+
+  private def runIdentifierDuplicateCheck(spec: CheckSpec): Vector[DataIssue] = {
+    spec.params.value.get("column").toVector.flatMap { columnValue =>
+      val column = columnValue.str
+      val duplicates = currentRows.map(_.values.getOrElse(column, "")).filter(_.nonEmpty).groupBy(identity).values.map(_.size - 1).filter(_ > 0).sum
+      Option.when(duplicates > 0)(
+        DataIssue("IDENTIFIER_DUPLICATES", column, "HIGH", duplicates, s"Identifier-like column '$column' contains duplicate values.", Obj())
+      )
+    }
+  }
+
+  private var currentRows: Vector[Row] = Vector.empty
+  private var currentExpectedSchema: Option[Value] = None
+
+  private def datasetColumns: Vector[String] =
+    currentRows.headOption.map(_.values.keys.toVector).getOrElse(Vector.empty)
+
+  private def numericColumns: Vector[String] =
+    datasetColumns.filter(column => currentRows.exists(row => parseDouble(row.values.getOrElse(column, "")).isDefined || isInfinity(row.values.getOrElse(column, ""))))
+
+  private def numericValues(column: String): Vector[Double] =
+    currentRows.map(_.values.getOrElse(column, "")).flatMap(parseDouble).filter(_.isFinite)
 
   private def countOutliers(values: Vector[Double]): Int = {
     if (values.size < 4) 0

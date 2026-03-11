@@ -37,6 +37,8 @@ scala-cli run src/main/scala/DataQualityAgentApp.scala -- \
 - detects missing values, duplicates, blank strings, infinities, negatives, and outliers
 - validates schema and allowed values from JSON
 - infers dataset semantics
+- converts supported AI-planned checks into executable validators
+- keeps unsupported AI suggestions as advisory checks in the report
 - writes a JSON report and prints a text report
 - includes a real stock-price dataset in `data/stocks.csv`
 
