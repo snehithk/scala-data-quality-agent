@@ -56,6 +56,8 @@ If you want the workflow to call OpenRouter, add a repository secret named `OPEN
 ## Files
 
 - `src/main/scala/DataQualityAgentApp.scala`
+- `src/main/scala/DataQualityAgent.scala`
+- `src/main/scala/Support.scala`
 - `data/stocks.csv`
 - `data/stocks_schema.json`
 - `examples/expected_schema.json`
